@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kayke Barbershop - Agendamento</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0c0a09;
+            color: #d1d5db;
+        }
+        input, button, select {
+            border-radius: 0.5rem;
+        }
+        .container-card {
+            background-color: #1f2937;
+            border: 1px solid #374151;
+        }
+        .btn-primary {
+            background-color: #3b82f6;
+            color: white;
+            transition: background-color 0.3s;
+        }
+        .btn-primary:hover {
+            background-color: #2563eb;
+        }
+        .btn-secondary {
+            background-color: #4b5563;
+            color: white;
+            transition: background-color 0.3s;
+        }
+        .btn-secondary:hover {
+            background-color: #374151;
+        }
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 0.5rem;
+        }
+        .calendar-day, .time-slot {
+            padding: 0.5rem;
+            text-align: center;
+            cursor: pointer;
+            transition: background-color 0.3s, transform 0.2s;
+        }
+        .calendar-day:hover, .time-slot:hover {
+            background-color: #374151;
+            transform: scale(1.05);
+        }
+        .calendar-day.available {
+            background-color: #10b981;
+            color: white;
+        }
+        .calendar-day.unavailable {
+            background-color: #4b5563;
+            color: #d1d5db;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        .calendar-day.unavailable:hover {
+            background-color: #4b5563;
+            transform: none;
+        }
+        .time-slot.booked {
+            background-color: #ef4444;
+            cursor: not-allowed;
+            color: white;
+            opacity: 0.6;
+        }
+        .time-slot.booked:hover {
+            background-color: #ef4444;
+            transform: none;
+        }
+        .message-box {
+            position: fixed;
+            top: 2rem;
+            right: 2rem;
+            z-index: 100;
+            background-color: #10b981;
+            color: white;
+            padding: 1rem 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, where, getDocs, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // Constants for collections
+        const AVAILABLE_SLOTS_PATH = `/artifacts/${appId}/public/data/available_slots`;
+        const BOOKED_APPOINTMENTS_PATH = `/artifacts/${appId}/public/data/booked_appointments`;
+
+        let userId = null;
+        let authReady = false;
+        let availableSlots = [];
+        let bookedAppointments = [];
+        let bookedAppointmentsByDate = {};
+        
+        // Log Firebase events for debugging
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        setLogLevel('debug');
+
+        // User ID display
+        const userIdDisplay = document.getElementById('userIdDisplay');
+        const loginSection = document.getElementById('loginSection');
+        const servicesSection = document.getElementById('servicesSection');
+        const calendarSection = document.getElementById('calendarSection');
+
+        function showSection(sectionId) {
+            loginSection.classList.add('hidden');
+            servicesSection.classList.add('hidden');
+            calendarSection.classList.add('hidden');
+            document.getElementById(sectionId).classList.remove('hidden');
+        }
+
+        function showMessage(text, isError = false) {
+            const messageBox = document.createElement('div');
+            messageBox.className = `message-box ${isError ? 'bg-red-500' : 'bg-green-500'}`;
+            messageBox.textContent = text;
+            document.body.appendChild(messageBox);
+            setTimeout(() => {
+                messageBox.remove();
+            }, 3000);
+        }
+
+        // --- Authentication ---
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                userId = user.uid;
+                userIdDisplay.textContent = `ID do Usuário: ${userId}`;
+                userIdDisplay.classList.remove('hidden');
+                showSection('servicesSection');
+                
+                // Load data for the authenticated user
+                loadData();
+            } else {
+                userId = null;
+                userIdDisplay.classList.add('hidden');
+                showSection('loginSection');
+                
+                if (initialAuthToken) {
+                    try {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                        console.log("Signed in with custom token.");
+                    } catch (error) {
+                        console.error("Error signing in with custom token:", error);
+                        // Fallback to anonymous sign-in
+                        await signInAnonymously(auth);
+                        console.log("Signed in anonymously as fallback.");
+                    }
+                } else {
+                    await signInAnonymously(auth);
+                    console.log("Signed in anonymously.");
+                }
+            }
+            authReady = true;
+        });
+
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('loginEmail').value;
+            const password = document.getElementById('loginPassword').value;
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+                showMessage('Login realizado com sucesso!');
+            } catch (error) {
+                console.error(error);
+                showMessage('Erro ao fazer login: ' + error.message, true);
+            }
+        });
+
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('registerEmail').value;
+            const password = document.getElementById('registerPassword').value;
+            try {
+                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                const user = userCredential.user;
+                await setDoc(doc(db, `/artifacts/${appId}/users/${user.uid}/profile/details`), {
+                    fullName: document.getElementById('registerName').value,
+                    phone: document.getElementById('registerPhone').value,
+                });
+                showMessage('Cadastro realizado com sucesso! Você está logado.');
+            } catch (error) {
+                console.error(error);
+                showMessage('Erro ao cadastrar: ' + error.message, true);
+            }
+        });
+
+        document.getElementById('showRegisterBtn').addEventListener('click', () => {
+            document.getElementById('loginForm').classList.add('hidden');
+            document.getElementById('registerForm').classList.remove('hidden');
+            document.getElementById('showRegisterBtn').classList.add('hidden');
+            document.getElementById('showLoginBtn').classList.remove('hidden');
+        });
+
+        document.getElementById('showLoginBtn').addEventListener('click', () => {
+            document.getElementById('loginForm').classList.remove('hidden');
+            document.getElementById('registerForm').classList.add('hidden');
+            document.getElementById('showRegisterBtn').classList.remove('hidden');
+            document.getElementById('showLoginBtn').classList.add('hidden');
+        });
+
+        document.getElementById('logoutBtn').addEventListener('click', async () => {
+            try {
+                await signOut(auth);
+                showMessage('Logout realizado com sucesso.');
+            } catch (error) {
+                console.error(error);
+                showMessage('Erro ao fazer logout: ' + error.message, true);
+            }
+        });
+
+        // --- Data Loading and Listeners ---
+        function loadData() {
+            if (!authReady || !userId) return;
+            
+            // Simular dados disponíveis para o proprietário
+            const dummySlots = [
+                { date: '2025-10-01', slots: ['09:00', '10:00', '11:00', '14:00', '15:00', '16:00'] },
+                { date: '2025-10-02', slots: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'] },
+                { date: '2025-10-03', slots: ['09:00', '10:00', '11:00', '12:00'] },
+                { date: '2025-10-05', slots: ['14:00', '15:00', '16:00'] },
+                { date: '2025-10-06', slots: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'] }
+            ];
+
+            // Realtime listener for available slots
+            onSnapshot(collection(db, AVAILABLE_SLOTS_PATH), (querySnapshot) => {
+                availableSlots = [];
+                querySnapshot.forEach((doc) => {
+                    availableSlots.push(doc.data());
+                });
+                console.log("Available slots loaded:", availableSlots);
+                // If no data, populate with dummy data
+                if (availableSlots.length === 0) {
+                    dummySlots.forEach(slot => {
+                        setDoc(doc(db, AVAILABLE_SLOTS_PATH, slot.date), slot);
+                    });
+                }
+            }, (error) => {
+                console.error("Error loading available slots:", error);
+                showMessage('Erro ao carregar dados de agendamento.', true);
+            });
+
+            // Realtime listener for booked appointments
+            onSnapshot(collection(db, BOOKED_APPOINTMENTS_PATH), (querySnapshot) => {
+                bookedAppointments = [];
+                bookedAppointmentsByDate = {};
+                querySnapshot.forEach((doc) => {
+                    const booking = doc.data();
+                    bookedAppointments.push(booking);
+                    if (!bookedAppointmentsByDate[booking.date]) {
+                        bookedAppointmentsByDate[booking.date] = [];
+                    }
+                    bookedAppointmentsByDate[booking.date].push(booking);
+                });
+                console.log("Booked appointments loaded:", bookedAppointments);
+            }, (error) => {
+                console.error("Error loading booked appointments:", error);
+                showMessage('Erro ao carregar agendamentos.', true);
+            });
+        }
+
+        // --- Services and Calendar Logic ---
+        document.getElementById('servicesContinueBtn').addEventListener('click', () => {
+            const selectedServices = Array.from(document.querySelectorAll('input[name="service"]:checked')).map(cb => cb.value);
+            if (selectedServices.length === 0) {
+                showMessage('Por favor, selecione pelo menos um serviço.', true);
+                return;
+            }
+            const requiredDuration = selectedServices.length; // 1 service = 1 hour
+            
+            showSection('calendarSection');
+            renderCalendar(requiredDuration);
+        });
+
+        function renderCalendar(requiredDuration) {
+            const calendarGrid = document.getElementById('calendarGrid');
+            calendarGrid.innerHTML = '';
+            const today = new Date();
+            const year = today.getFullYear();
+            const month = today.getMonth();
+            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            
+            const calendarHeader = document.getElementById('calendarHeader');
+            calendarHeader.textContent = `Outubro de ${year}`; // Hardcoded for simplicity
+
+            const daysOfWeek = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+            daysOfWeek.forEach(day => {
+                const dayHeader = document.createElement('div');
+                dayHeader.className = 'text-center font-bold text-gray-400';
+                dayHeader.textContent = day;
+                calendarGrid.appendChild(dayHeader);
+            });
+
+            const firstDay = new Date(year, month, 1).getDay();
+            for (let i = 0; i < firstDay; i++) {
+                calendarGrid.appendChild(document.createElement('div'));
+            }
+
+            for (let i = 1; i <= daysInMonth; i++) {
+                const dayElement = document.createElement('div');
+                dayElement.textContent = i;
+                dayElement.className = 'calendar-day rounded-lg';
+                
+                const currentDate = new Date(year, month, i);
+                const formattedDate = currentDate.toISOString().split('T')[0];
+
+                const isAvailable = availableSlots.some(s => s.date === formattedDate);
+                const isPast = currentDate < new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+                if (isPast) {
+                    dayElement.classList.add('unavailable');
+                } else if (isAvailable) {
+                    dayElement.classList.add('bg-blue-600', 'hover:bg-blue-700', 'cursor-pointer');
+                    dayElement.addEventListener('click', () => {
+                        renderTimeSlots(formattedDate, requiredDuration);
+                    });
+                } else {
+                    dayElement.classList.add('unavailable');
+                }
+                
+                calendarGrid.appendChild(dayElement);
+            }
+        }
+
+        function renderTimeSlots(selectedDate, requiredDuration) {
+            const timeSlotsContainer = document.getElementById('timeSlots');
+            timeSlotsContainer.innerHTML = '';
+            
+            const availableDay = availableSlots.find(s => s.date === selectedDate);
+            if (!availableDay) {
+                timeSlotsContainer.innerHTML = '<p class="text-red-400">Nenhum horário disponível para esta data.</p>';
+                return;
+            }
+            
+            const allSlots = availableDay.slots.map(t => new Date(`${selectedDate}T${t}:00`));
+            const availableTimeSlots = [];
+
+            for (let i = 0; i <= allSlots.length - requiredDuration; i++) {
+                let isConsecutive = true;
+                const bookedForThisDay = bookedAppointmentsByDate[selectedDate] || [];
+                
+                for (let j = 0; j < requiredDuration; j++) {
+                    const currentSlot = allSlots[i + j];
+                    const slotTime = currentSlot.toTimeString().substring(0, 5);
+                    
+                    const isBooked = bookedForThisDay.some(booking => {
+                        const bookingEndTime = new Date(new Date(`${booking.date}T${booking.time}:00`).getTime() + booking.duration * 60 * 60 * 1000);
+                        return currentSlot >= new Date(`${booking.date}T${booking.time}:00`) && currentSlot < bookingEndTime;
+                    });
+                    
+                    if (isBooked) {
+                        isConsecutive = false;
+                        // Skip ahead to the end of the booked slot
+                        const bookedSlot = bookedForThisDay.find(booking => {
+                            const bookingEndTime = new Date(new Date(`${booking.date}T${booking.time}:00`).getTime() + booking.duration * 60 * 60 * 1000);
+                            return currentSlot >= new Date(`${booking.date}T${booking.time}:00`) && currentSlot < bookingEndTime;
+                        });
+                        const bookedEndHour = new Date(new Date(`${bookedSlot.date}T${bookedSlot.time}:00`).getTime() + bookedSlot.duration * 60 * 60 * 1000).getHours();
+                        const nextSlotHour = currentSlot.getHours() + 1;
+                        if (nextSlotHour < bookedEndHour) {
+                            i += (bookedEndHour - nextSlotHour);
+                        }
+                        break;
+                    }
+                }
+                
+                if (isConsecutive) {
+                    availableTimeSlots.push(allSlots[i]);
+                }
+            }
+            
+            if (availableTimeSlots.length === 0) {
+                timeSlotsContainer.innerHTML = '<p class="text-red-400">Nenhum horário disponível para a duração selecionada.</p>';
+                return;
+            }
+
+            availableTimeSlots.forEach(slot => {
+                const timeElement = document.createElement('div');
+                timeElement.className = 'time-slot bg-gray-700 rounded-lg shadow-md hover:bg-gray-600';
+                timeElement.textContent = slot.toTimeString().substring(0, 5);
+                timeElement.addEventListener('click', () => {
+                    const confirmed = confirm(`Deseja agendar para ${slot.toLocaleDateString()} às ${slot.toTimeString().substring(0, 5)}?`);
+                    if (confirmed) {
+                        bookAppointment(selectedDate, slot.toTimeString().substring(0, 5), requiredDuration);
+                    }
+                });
+                timeSlotsContainer.appendChild(timeElement);
+            });
+        }
+
+        async function bookAppointment(date, time, duration) {
+            try {
+                const selectedServices = Array.from(document.querySelectorAll('input[name="service"]:checked')).map(cb => cb.value);
+                const appointmentData = {
+                    userId: userId,
+                    services: selectedServices,
+                    date: date,
+                    time: time,
+                    duration: duration,
+                    createdAt: new Date()
+                };
+                await addDoc(collection(db, BOOKED_APPOINTMENTS_PATH), appointmentData);
+                showMessage('Agendamento realizado com sucesso!');
+                showSection('servicesSection');
+            } catch (error) {
+                console.error("Error booking appointment:", error);
+                showMessage('Erro ao realizar agendamento: ' + error.message, true);
+            }
+        }
+    </script>
+
+    <!-- Main Container -->
+    <div class="w-full max-w-2xl container-card p-8 rounded-xl shadow-2xl space-y-6">
+
+        <!-- Header -->
+        <header class="text-center space-y-2">
+            <h1 class="text-3xl font-bold text-white">Kayke Barbershop</h1>
+            <p class="text-lg text-gray-400">Agende seu horário!</p>
+            <div id="userIdDisplay" class="text-sm text-gray-500 hidden break-all"></div>
+            <button id="logoutBtn" class="mt-4 px-4 py-2 rounded-lg text-white bg-red-600 hover:bg-red-700">Sair</button>
+        </header>
+
+        <!-- Login/Register Section -->
+        <section id="loginSection" class="space-y-4">
+            <h2 class="text-2xl font-semibold text-white text-center">Acesse sua conta</h2>
+
+            <!-- Login Form -->
+            <form id="loginForm" class="space-y-4">
+                <div>
+                    <label for="loginEmail" class="block text-gray-400">Email ou Telefone</label>
+                    <input type="text" id="loginEmail" class="w-full mt-1 p-2 bg-gray-800 border border-gray-700 text-white rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <div>
+                    <label for="loginPassword" class="block text-gray-400">Senha</label>
+                    <input type="password" id="loginPassword" class="w-full mt-1 p-2 bg-gray-800 border border-gray-700 text-white rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <button type="submit" class="w-full p-3 btn-primary font-semibold">Entrar</button>
+            </form>
+
+            <!-- Register Form (hidden by default) -->
+            <form id="registerForm" class="hidden space-y-4">
+                <div>
+                    <label for="registerName" class="block text-gray-400">Nome Completo</label>
+                    <input type="text" id="registerName" class="w-full mt-1 p-2 bg-gray-800 border border-gray-700 text-white rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <div>
+                    <label for="registerPhone" class="block text-gray-400">Telefone</label>
+                    <input type="tel" id="registerPhone" class="w-full mt-1 p-2 bg-gray-800 border border-gray-700 text-white rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <div>
+                    <label for="registerEmail" class="block text-gray-400">Email</label>
+                    <input type="email" id="registerEmail" class="w-full mt-1 p-2 bg-gray-800 border border-gray-700 text-white rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <div>
+                    <label for="registerPassword" class="block text-gray-400">Senha</label>
+                    <input type="password" id="registerPassword" class="w-full mt-1 p-2 bg-gray-800 border border-gray-700 text-white rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <button type="submit" class="w-full p-3 btn-primary font-semibold">Cadastrar</button>
+            </form>
+
+            <div class="text-center text-gray-400">
+                <button id="showRegisterBtn" class="underline text-sm hover:text-white">Não tem conta? Cadastre-se</button>
+                <button id="showLoginBtn" class="hidden underline text-sm hover:text-white">Já tem conta? Faça login</button>
+            </div>
+        </section>
+
+        <!-- Services Section (hidden by default) -->
+        <section id="servicesSection" class="hidden space-y-4">
+            <h2 class="text-2xl font-semibold text-white text-center">Selecione os serviços</h2>
+            <div class="space-y-2">
+                <div class="flex items-center space-x-2 p-3 bg-gray-800 rounded-lg">
+                    <input type="checkbox" id="cabelo" name="service" value="cabelo" class="h-5 w-5 text-blue-600 rounded-md focus:ring-blue-500">
+                    <label for="cabelo" class="text-lg text-gray-300">Cabelo</label>
+                </div>
+                <div class="flex items-center space-x-2 p-3 bg-gray-800 rounded-lg">
+                    <input type="checkbox" id="barba" name="service" value="barba" class="h-5 w-5 text-blue-600 rounded-md focus:ring-blue-500">
+                    <label for="barba" class="text-lg text-gray-300">Barba</label>
+                </div>
+                <div class="flex items-center space-x-2 p-3 bg-gray-800 rounded-lg">
+                    <input type="checkbox" id="sombracelha" name="service" value="sombracelha" class="h-5 w-5 text-blue-600 rounded-md focus:ring-blue-500">
+                    <label for="sombracelha" class="text-lg text-gray-300">Sombrancelha</label>
+                </div>
+            </div>
+            <button id="servicesContinueBtn" class="w-full p-3 btn-primary font-semibold">Continuar</button>
+        </section>
+
+        <!-- Calendar Section (hidden by default) -->
+        <section id="calendarSection" class="hidden space-y-4">
+            <h2 class="text-2xl font-semibold text-white text-center">Escolha a data e o horário</h2>
+            
+            <div class="bg-gray-800 p-4 rounded-xl shadow-inner space-y-4">
+                <div class="flex justify-between items-center text-xl font-bold">
+                    <button class="text-gray-400 hover:text-white">&lt;</button>
+                    <span id="calendarHeader">Outubro de 2025</span>
+                    <button class="text-gray-400 hover:text-white">&gt;</button>
+                </div>
+                <div id="calendarGrid" class="calendar-grid">
+                    <!-- Calendar days will be rendered here by JS -->
+                </div>
+            </div>
+
+            <div id="timeSlots" class="grid grid-cols-2 sm:grid-cols-3 gap-2 p-4 bg-gray-800 rounded-xl shadow-inner">
+                <p class="col-span-full text-center text-gray-400">Clique em uma data para ver os horários disponíveis.</p>
+            </div>
+            
+            <button onclick="showSection('servicesSection')" class="w-full p-3 btn-secondary font-semibold">Voltar</button>
+        </section>
+
+    </div>
+
+</body>
+</html>
